@@ -1,3 +1,5 @@
+<p align="left"> <img src="https://api.sadiq.us.to/app/github/repo/lockscreen-powermenu-blocker/views?nocache=true" alt="" /> </p>
+
 # lockscreen-powermenu-blocker
 
 A Magisk module to disable the power menu while the screen is locked on Android devices.
