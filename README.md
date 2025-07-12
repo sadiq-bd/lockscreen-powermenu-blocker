@@ -1,4 +1,4 @@
-<p align="left"> <img src="https://api.sadiq.us.to/app/github/repo/lockscreen-powermenu-blocker/views?nocache=true" alt="" /> </p>
+<p align="left"> <img src="https://api.sadiq.workers.dev/app/github/repo/lockscreen-powermenu-blocker/views?nocache=true" alt="" /> </p>
 
 # lockscreen-powermenu-blocker
 
