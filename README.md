@@ -6,18 +6,30 @@ A Magisk module to disable the power menu while the screen is locked on Android 
 
 ## Overview
 
-`lockscreen-powermenu-blocker` is a shell-based Magisk module that prevents access to the power menu when your device is locked. This enhances device security by ensuring no one can power off, restart, or access other power menu options from the lockscreen.
+`lockscreen-powermenu-blocker` runs a small Java daemon through Android's internal `app_process` runtime. While the device is locked, it disables Android's power-button long-press policy so the power menu cannot appear from the lockscreen.
+
+This also covers occluded lockscreen states, such as opening the camera from the lockscreen: the device is still locked, so the power menu remains blocked even though a camera activity is visible.
 
 ## Features
 
 - Blocks power menu access when the screen is locked
-- Universal and efficient: dynamically detects the correct input device for the power key
-- Minimal CPU usage
+- Handles lockscreen camera and other keyguard-occluded states
+- Uses internal Java APIs; no `getevent` input polling
+- Event-driven with a low-rate safety refresh for minimal CPU usage
+- Restores the user's original power-button behavior after unlock
 - Easy to install and uninstall
 
 ## How It Works
 
-The module uses a background shell script to monitor the power key event. If the power button is held down while the device is locked, the script quickly turns the screen off, preventing the power menu from being shown.
+Magisk starts `BlockerService.jar` with `app_process` at boot. The Java daemon binds to Android framework services directly:
+
+- `WindowManager` checks whether keyguard is active.
+- `KeyguardManager` confirms device-locked state, including lockscreen-camera cases.
+- `Settings.Global` temporarily sets power-button long-press behavior to `0` while locked.
+
+The service reacts to screen and unlock broadcasts, then performs a safety refresh every 5 seconds in case a framework transition was missed. It does not monitor raw input events and does not run a high-frequency shell loop.
+
+Before changing any power-button setting, the daemon saves the original value into private backup keys. After the device is unlocked, those values are restored.
 
 ## Installation
 
@@ -36,18 +48,23 @@ The module uses a background shell script to monitor the power key event. If the
 ## Compatibility
 
 - Android devices with Magisk installed
-- No hardcoded event device: works universally across most Android devices
-- Requires access to `/system/bin/sh` and the `getevent` utility
+- AOSP-based ROMs that honor `Settings.Global` power-button policy keys
+- Requires Java framework access through `app_process`
+- No hardcoded input device paths and no `getevent` dependency
 
 ## Technical Details
 
-- The script runs as a background service to monitor power button events.
-- It dynamically locates the input device responsible for power key events.
-- When the power key is pressed while the device is locked, the script triggers a screen-off event, blocking the power menu.
+- `service.sh` only launches the Java daemon with `app_process`.
+- `BlockerService` uses internal Binder/framework APIs through reflection where needed.
+- While locked, it disables:
+  - `power_button_long_press`
+  - `power_button_very_long_press`
+  - `long_press_power_behavior` for older/custom ROM fallback
+- On unlock, it restores the previously saved values.
 
 ## Source
 
-See [`system/bin/lockscreen-powermenu-blocker.sh`](system/bin/lockscreen-powermenu-blocker.sh) for the main implementation.
+See [`BlockerService.java`](BlockerService.java) for the main implementation.
 
 ## Credits
 

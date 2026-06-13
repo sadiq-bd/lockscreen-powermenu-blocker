@@ -30,13 +30,21 @@ jobs:
 
             - name: Compile Java Code
               run: |
-                  javac -cp $ANDROID_HOME/platforms/android-34/android.jar BlockerService.java
+                  mkdir -p build/classes
+                  javac \
+                    -cp "$ANDROID_HOME/platforms/android-34/android.jar" \
+                    -d build/classes \
+                    BlockerService.java
 
             - name: Dex Bytecode with d8
               run: |
-                  $ANDROID_HOME/build-tools/34.0.0/d8 *.class \
-                    --lib $ANDROID_HOME/platforms/android-34/android.jar \
+                  "$ANDROID_HOME/build-tools/34.0.0/d8" build/classes/*.class \
+                    --lib "$ANDROID_HOME/platforms/android-34/android.jar" \
                     --output system/usr/share/lockscreen-powermenu-blocker/BlockerService.jar
+
+            - name: Verify Module Payload
+              run: |
+                  test -s system/usr/share/lockscreen-powermenu-blocker/BlockerService.jar
 
             - name: Create ZIP
               run: |
@@ -48,6 +56,7 @@ jobs:
                     -x ".gitignore" \
                     -x "*.java" \
                     -x "*.class" \
+                    -x "build/*" \
                     -x "system/usr/share/lockscreen-powermenu-blocker/placeholder"
 
                   echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"

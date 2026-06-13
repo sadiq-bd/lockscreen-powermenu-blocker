@@ -1,31 +1,54 @@
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.app.KeyguardManager;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 
 public class BlockerService {
-    private static final int KEYCODE_POWER = 26;
-    private static final long HOLD_THRESHOLD_MS = 210;
+    private static final long SAFETY_REFRESH_MS = 5000;
+    private static final int USER_SYSTEM = 0;
+    private static final String NULL_SENTINEL = "__LOCKSCREEN_POWERMENU_BLOCKER_NULL__";
+    private static final String BACKUP_PREFIX = "lockscreen_powermenu_blocker_backup_";
 
+    // AOSP PhoneWindowManager reads these Settings.Global keys for power hold actions.
+    private static final String POWER_BUTTON_LONG_PRESS = "power_button_long_press";
+    private static final String POWER_BUTTON_VERY_LONG_PRESS = "power_button_very_long_press";
+    private static final String LEGACY_LONG_PRESS_POWER_BEHAVIOR = "long_press_power_behavior";
+
+    private static final int POWER_BEHAVIOR_NOTHING = 0;
+
+    private static final String[] POWER_MENU_SETTINGS = new String[] {
+            POWER_BUTTON_LONG_PRESS,
+            POWER_BUTTON_VERY_LONG_PRESS,
+            LEGACY_LONG_PRESS_POWER_BEHAVIOR
+    };
+
+    private static final Object policyLock = new Object();
+
+    private static Context systemContext = null;
     private static Object windowManagerService = null;
-    private static Object inputManagerService = null;
-
-    // Marked volatile to ensure cross-thread memory synchronization
-    private static volatile boolean isHoldingPower = false;
-    private static volatile long powerKeyDownTime = 0;
+    private static ContentResolver contentResolver = null;
+    private static KeyguardManager keyguardManager = null;
+    private static Handler handler = null;
+    private static Method isKeyguardLockedMethod = null;
+    private static boolean powerMenuBlocked = false;
 
     public static void main(String[] args) {
-        System.out.println("[BlockerService] Initializing pure Java API daemon...");
+        System.out.println("[BlockerService] Initializing internal power-menu policy daemon...");
 
-        // 1. Setup the binder connections to the internal OS managers
         initSystemServices();
+        registerStateReceivers();
+        applyPowerMenuPolicy("startup");
+        scheduleSafetyRefresh();
 
-        // 2. Register our native Java input monitor hook directly into the OS framework
-        registerInputMonitor();
-
-        // 3. Keep the process alive and listening using the thread's event loop
-        Looper.prepare();
+        if (Looper.myLooper() == null) {
+            Looper.prepare();
+        }
         Looper.loop();
     }
 
@@ -34,134 +57,189 @@ public class BlockerService {
             Class<?> sm = Class.forName("android.os.ServiceManager");
             Method getService = sm.getMethod("getService", String.class);
 
-            // Bind WindowManager
+            // Bind WindowManager to check lock state
             IBinder wmBinder = (IBinder) getService.invoke(null, "window");
             Class<?> wmStub = Class.forName("android.view.IWindowManager$Stub");
             windowManagerService = wmStub.getMethod("asInterface", IBinder.class).invoke(null, wmBinder);
+            isKeyguardLockedMethod = windowManagerService.getClass().getMethod("isKeyguardLocked");
 
-            // Bind InputManager
-            IBinder inputBinder = (IBinder) getService.invoke(null, "input");
-            Class<?> inputStub = Class.forName("android.hardware.input.IInputManager$Stub");
-            inputManagerService = inputStub.getMethod("asInterface", IBinder.class).invoke(null, inputBinder);
+            systemContext = createSystemContext();
+            contentResolver = systemContext.getContentResolver();
+            keyguardManager = (KeyguardManager) systemContext.getSystemService(Context.KEYGUARD_SERVICE);
+            if (Looper.myLooper() == null) {
+                Looper.prepare();
+            }
+            handler = new Handler(Looper.myLooper());
+
+            System.out.println("[BlockerService] Connected to WindowManager and SettingsProvider.");
         } catch (Exception e) {
-            System.err.println("[BlockerService] Failed to initialize system interfaces.");
+            System.err.println("[BlockerService] Failed to initialize internal services:");
             e.printStackTrace();
         }
     }
 
-    private static void registerInputMonitor() {
-        if (inputManagerService == null) return;
-        try {
-            Class<?> inputEventListenerClass = Class.forName("android.hardware.input.IInputEventListener");
+    private static Context createSystemContext() throws Exception {
+        Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+        Object activityThread = activityThreadClass.getMethod("currentActivityThread").invoke(null);
+        if (activityThread == null) {
+            activityThread = activityThreadClass.getMethod("systemMain").invoke(null);
+        }
+        return (Context) activityThreadClass.getMethod("getSystemContext").invoke(activityThread);
+    }
 
-            Object inputEventListenerProxy = Proxy.newProxyInstance(
-                BlockerService.class.getClassLoader(),
-                new Class<?>[]{inputEventListenerClass},
-                new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                        if (method.getName().equals("onInputEvent")) {
-                            Object inputEvent = args[0];
-                            handleInputEvent(inputEvent);
-                        }
-                        return null;
-                    }
-                }
-            );
+    private static void registerStateReceivers() {
+        if (systemContext == null) {
+            System.err.println("[BlockerService] Cannot register state receivers: no system context.");
+            return;
+        }
 
-            // Register the proxy into the OS pipeline
-            Method registerMethod = inputManagerService.getClass().getMethod("registerInputEventListener", inputEventListenerClass);
-            registerMethod.invoke(inputManagerService, inputEventListenerProxy);
-            System.out.println("[BlockerService] Native Java Input Event Listener registered successfully.");
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
 
-        } catch (Exception e) {
-            System.err.println("[BlockerService] Critical error bypassing standard input pipeline:");
-            e.printStackTrace();
+        systemContext.registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent != null ? intent.getAction() : "unknown";
+                applyPowerMenuPolicy(action);
+            }
+        }, filter);
+
+        System.out.println("[BlockerService] Registered lockscreen state receivers.");
+    }
+
+    private static void scheduleSafetyRefresh() {
+        if (handler == null) return;
+
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                applyPowerMenuPolicy("safety-refresh");
+                scheduleSafetyRefresh();
+            }
+        }, SAFETY_REFRESH_MS);
+    }
+
+    private static void applyPowerMenuPolicy(String reason) {
+        synchronized (policyLock) {
+            boolean locked = isDeviceLocked();
+
+            if (locked) {
+                backupAndDisablePowerMenu(reason);
+            } else {
+                restorePowerMenu(reason);
+            }
         }
     }
 
-    private static void handleInputEvent(Object inputEvent) {
+    private static boolean isDeviceLocked() {
+        boolean locked = false;
+
+        if (windowManagerService != null && isKeyguardLockedMethod != null) {
+            try {
+                locked = (boolean) isKeyguardLockedMethod.invoke(windowManagerService);
+            } catch (Exception e) {
+                System.err.println("[BlockerService] isKeyguardLocked failed: " + e.getMessage());
+            }
+        }
+
+        if (!locked && keyguardManager != null) {
+            try {
+                locked = keyguardManager.isDeviceLocked();
+            } catch (Exception e) {
+                System.err.println("[BlockerService] isDeviceLocked failed: " + e.getMessage());
+            }
+        }
+
+        return locked;
+    }
+
+    private static void backupAndDisablePowerMenu(String reason) {
+        boolean changed = false;
+
+        for (String key : POWER_MENU_SETTINGS) {
+            String backupKey = getBackupKey(key);
+            String backup = getGlobalSetting(backupKey);
+
+            if (backup == null) {
+                putGlobalSetting(backupKey, encodeNullable(getGlobalSetting(key)));
+            }
+
+            String disabled = String.valueOf(POWER_BEHAVIOR_NOTHING);
+            String current = getGlobalSetting(key);
+            if (!disabled.equals(current)) {
+                putGlobalSetting(key, disabled);
+                changed = true;
+            }
+        }
+
+        if (!powerMenuBlocked || changed) {
+            powerMenuBlocked = true;
+            System.out.println("[BlockerService] Power menu disabled while device is locked. reason=" + reason);
+        }
+    }
+
+    private static void restorePowerMenu(String reason) {
+        boolean restored = false;
+
+        for (String key : POWER_MENU_SETTINGS) {
+            String backupKey = getBackupKey(key);
+            String backup = getGlobalSetting(backupKey);
+
+            if (backup != null) {
+                putGlobalSetting(key, decodeNullable(backup));
+                putGlobalSetting(backupKey, null);
+                restored = true;
+            }
+        }
+
+        if (powerMenuBlocked || restored) {
+            powerMenuBlocked = false;
+            System.out.println("[BlockerService] Power menu settings restored after unlock. reason=" + reason);
+        }
+    }
+
+    private static String getBackupKey(String key) {
+        return BACKUP_PREFIX + key;
+    }
+
+    private static String encodeNullable(String value) {
+        return value == null ? NULL_SENTINEL : value;
+    }
+
+    private static String decodeNullable(String value) {
+        return NULL_SENTINEL.equals(value) ? null : value;
+    }
+
+    private static String getGlobalSetting(String key) {
+        if (contentResolver == null) return null;
         try {
-            Class<?> keyEventClass = Class.forName("android.view.KeyEvent");
+            Class<?> settingsGlobalClass = Class.forName("android.provider.Settings$Global");
+            Method getString = settingsGlobalClass.getMethod("getStringForUser",
+                    Class.forName("android.content.ContentResolver"), String.class, Integer.TYPE);
+            return (String) getString.invoke(null, contentResolver, key, USER_SYSTEM);
+        } catch (Exception e) {
+            System.err.println("[BlockerService] Failed to read global setting " + key + ": " + e.getMessage());
+            return null;
+        }
+    }
 
-            if (keyEventClass.isInstance(inputEvent)) {
-                Method getKeyCode = keyEventClass.getMethod("getKeyCode");
-                Method getAction = keyEventClass.getMethod("getAction");
-
-                int keyCode = (int) getKeyCode.invoke(inputEvent);
-                int action = (int) getAction.invoke(inputEvent); // 0 = DOWN, 1 = UP
-
-                if (keyCode == KEYCODE_POWER) {
-                    if (action == 0) { // Key Down
-                        if (!isHoldingPower) {
-                            isHoldingPower = true;
-                            powerKeyDownTime = System.currentTimeMillis();
-
-                            // Spin up an isolated supervisor timing thread for this specific sequence
-                            new Thread(BlockerService::evaluateHoldSequence).start();
-                        }
-                    } else if (action == 1) { // Key Up
-                        isHoldingPower = false;
-                        powerKeyDownTime = 0;
-                    }
-                }
+    private static void putGlobalSetting(String key, String value) {
+        if (contentResolver == null) {
+            System.err.println("[BlockerService] Cannot mutate global setting " + key + ": no ContentResolver.");
+            return;
+        }
+        try {
+            Class<?> settingsGlobalClass = Class.forName("android.provider.Settings$Global");
+            Method putString = settingsGlobalClass.getMethod("putStringForUser",
+                    Class.forName("android.content.ContentResolver"), String.class, String.class, Integer.TYPE);
+            boolean ok = (boolean) putString.invoke(null, contentResolver, key, value, USER_SYSTEM);
+            if (!ok) {
+                System.err.println("[BlockerService] Framework rejected global setting mutation: " + key);
             }
         } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private static void evaluateHoldSequence() {
-        try {
-            long currentTriggerTime = powerKeyDownTime;
-            Thread.sleep(HOLD_THRESHOLD_MS);
-
-            // Verify if the button is still physically compressed
-            if (isHoldingPower && powerKeyDownTime == currentTriggerTime) {
-                if (shouldBlockPowerMenu()) {
-                    injectPowerKeyToggle();
-                }
-                powerKeyDownTime = 0; // Clear trigger sequence
-            }
-        } catch (InterruptedException ignored) {}
-    }
-
-    private static boolean shouldBlockPowerMenu() {
-        if (windowManagerService == null) return false;
-        try {
-            // Is the device currently at the lock screen interface? (Handles camera overlay modes)
-            Method isLocked = windowManagerService.getClass().getMethod("isKeyguardLocked");
-            boolean keyguardActive = (boolean) isLocked.invoke(windowManagerService);
-
-            // Is the OS inflating the Power Menu (Global Actions Dialog)?
-            Method isGlobalActionsShowing = windowManagerService.getClass().getMethod("isGlobalActionsShowing");
-            boolean powerMenuVisible = (boolean) isGlobalActionsShowing.invoke(windowManagerService);
-
-            return (powerMenuVisible || keyguardActive);
-        } catch (Exception e) {
-            // Fallback safety bounds
-            return true;
-        }
-    }
-
-    private static void injectPowerKeyToggle() {
-        if (inputManagerService == null) return;
-        try {
-            Class<?> keyEventClass = Class.forName("android.view.KeyEvent");
-            Method injectMethod = inputManagerService.getClass().getMethod("injectInputEvent",
-                    Class.forName("android.view.InputEvent"), Integer.TYPE);
-
-            // Inject Key Down (Action 0)
-            Object keyDown = keyEventClass.getConstructor(Integer.TYPE, Integer.TYPE).newInstance(0, KEYCODE_POWER);
-            injectMethod.invoke(inputManagerService, keyDown, 0); // 0 = ASYNC MODE
-
-            // Inject Key Up (Action 1)
-            Object keyUp = keyEventClass.getConstructor(Integer.TYPE, Integer.TYPE).newInstance(1, KEYCODE_POWER);
-            injectMethod.invoke(inputManagerService, keyUp, 0);
-
-            System.out.println("[BlockerService] Collapsed Power Menu interface safely.");
-        } catch (Exception e) {
-            System.err.println("[BlockerService] Injection failed.");
+            System.err.println("[BlockerService] Failed to mutate global setting " + key + ": " + e.getMessage());
             e.printStackTrace();
         }
     }
