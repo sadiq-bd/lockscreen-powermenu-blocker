@@ -1,6 +1,5 @@
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.RemoteException;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -12,8 +11,9 @@ public class BlockerService {
     private static Object windowManagerService = null;
     private static Object inputManagerService = null;
 
-    private static boolean isHoldingPower = false;
-    private static long powerKeyDownTime = 0;
+    // Marked volatile to ensure cross-thread memory synchronization
+    private static volatile boolean isHoldingPower = false;
+    private static volatile long powerKeyDownTime = 0;
 
     public static void main(String[] args) {
         System.out.println("[BlockerService] Initializing pure Java API daemon...");
@@ -34,10 +34,12 @@ public class BlockerService {
             Class<?> sm = Class.forName("android.os.ServiceManager");
             Method getService = sm.getMethod("getService", String.class);
 
+            // Bind WindowManager
             IBinder wmBinder = (IBinder) getService.invoke(null, "window");
             Class<?> wmStub = Class.forName("android.view.IWindowManager$Stub");
             windowManagerService = wmStub.getMethod("asInterface", IBinder.class).invoke(null, wmBinder);
 
+            // Bind InputManager
             IBinder inputBinder = (IBinder) getService.invoke(null, "input");
             Class<?> inputStub = Class.forName("android.hardware.input.IInputManager$Stub");
             inputManagerService = inputStub.getMethod("asInterface", IBinder.class).invoke(null, inputBinder);
@@ -50,17 +52,14 @@ public class BlockerService {
     private static void registerInputMonitor() {
         if (inputManagerService == null) return;
         try {
-            // Android abstracts raw hardware events through a hidden system framework pipeline.
-            // We use a dynamic Java Proxy to implement the hidden 'android.hardware.input.IInputEventListener' interface at runtime.
             Class<?> inputEventListenerClass = Class.forName("android.hardware.input.IInputEventListener");
 
             Object inputEventListenerProxy = Proxy.newProxyInstance(
-                BlockerServiceService.class.getClassLoader(),
+                BlockerService.class.getClassLoader(),
                 new Class<?>[]{inputEventListenerClass},
                 new InvocationHandler() {
                     @Override
                     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                        // The OS invokes 'onInputEvent(InputEvent event)' when data routes through the pipeline
                         if (method.getName().equals("onInputEvent")) {
                             Object inputEvent = args[0];
                             handleInputEvent(inputEvent);
@@ -70,8 +69,7 @@ public class BlockerService {
                 }
             );
 
-            // Register our proxy hook directly into the Input Manager
-            // Invokes: public void registerInputEventListener(IInputEventListener listener)
+            // Register the proxy into the OS pipeline
             Method registerMethod = inputManagerService.getClass().getMethod("registerInputEventListener", inputEventListenerClass);
             registerMethod.invoke(inputManagerService, inputEventListenerProxy);
             System.out.println("[BlockerService] Native Java Input Event Listener registered successfully.");
@@ -86,13 +84,12 @@ public class BlockerService {
         try {
             Class<?> keyEventClass = Class.forName("android.view.KeyEvent");
 
-            // Filter stream to catch hardware keyboard/button events exclusively
             if (keyEventClass.isInstance(inputEvent)) {
                 Method getKeyCode = keyEventClass.getMethod("getKeyCode");
                 Method getAction = keyEventClass.getMethod("getAction");
 
                 int keyCode = (int) getKeyCode.invoke(inputEvent);
-                int action = (int) getAction.invoke(inputEvent); // 0 = ACTION_DOWN, 1 = ACTION_UP
+                int action = (int) getAction.invoke(inputEvent); // 0 = DOWN, 1 = UP
 
                 if (keyCode == KEYCODE_POWER) {
                     if (action == 0) { // Key Down
@@ -101,7 +98,7 @@ public class BlockerService {
                             powerKeyDownTime = System.currentTimeMillis();
 
                             // Spin up an isolated supervisor timing thread for this specific sequence
-                            new Thread(BlockerServiceService::evaluateHoldSequence).start();
+                            new Thread(BlockerService::evaluateHoldSequence).start();
                         }
                     } else if (action == 1) { // Key Up
                         isHoldingPower = false;
@@ -119,7 +116,7 @@ public class BlockerService {
             long currentTriggerTime = powerKeyDownTime;
             Thread.sleep(HOLD_THRESHOLD_MS);
 
-            // Verify if the button is still physically compressed and tracking state remains unchanged
+            // Verify if the button is still physically compressed
             if (isHoldingPower && powerKeyDownTime == currentTriggerTime) {
                 if (shouldBlockPowerMenu()) {
                     injectPowerKeyToggle();
@@ -136,13 +133,13 @@ public class BlockerService {
             Method isLocked = windowManagerService.getClass().getMethod("isKeyguardLocked");
             boolean keyguardActive = (boolean) isLocked.invoke(windowManagerService);
 
-            // Is the system server currently inflating or painting the Global Power Action Panel?
+            // Is the OS inflating the Power Menu (Global Actions Dialog)?
             Method isGlobalActionsShowing = windowManagerService.getClass().getMethod("isGlobalActionsShowing");
             boolean powerMenuVisible = (boolean) isGlobalActionsShowing.invoke(windowManagerService);
 
             return (powerMenuVisible || keyguardActive);
         } catch (Exception e) {
-            // Fallback safety bounds for various custom Android vendor OS structures
+            // Fallback safety bounds
             return true;
         }
     }
@@ -154,17 +151,17 @@ public class BlockerService {
             Method injectMethod = inputManagerService.getClass().getMethod("injectInputEvent",
                     Class.forName("android.view.InputEvent"), Integer.TYPE);
 
-            // Construct Key Down (Action 0)
+            // Inject Key Down (Action 0)
             Object keyDown = keyEventClass.getConstructor(Integer.TYPE, Integer.TYPE).newInstance(0, KEYCODE_POWER);
-            injectMethod.invoke(inputManagerService, keyDown, 0); // 0 = INJECT_INPUT_EVENT_MODE_ASYNC
+            injectMethod.invoke(inputManagerService, keyDown, 0); // 0 = ASYNC MODE
 
-            // Construct Key Up (Action 1)
+            // Inject Key Up (Action 1)
             Object keyUp = keyEventClass.getConstructor(Integer.TYPE, Integer.TYPE).newInstance(1, KEYCODE_POWER);
             injectMethod.invoke(inputManagerService, keyUp, 0);
 
-            System.out.println("[BlockerService] Collapsed Power Menu interface via pure Java API.");
+            System.out.println("[BlockerService] Collapsed Power Menu interface safely.");
         } catch (Exception e) {
-            System.err.println("[BlockerService] System binder validation injection failed.");
+            System.err.println("[BlockerService] Injection failed.");
             e.printStackTrace();
         }
     }
