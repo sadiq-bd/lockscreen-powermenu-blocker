@@ -41,6 +41,31 @@ Before changing any power-button setting, the daemon saves the original value in
    - Tap "Install from storage" and select the ZIP file.
 3. **Reboot your device.**
 
+## Local Build
+
+Requirements:
+
+- JDK 17 or newer
+- Android SDK with platform and build-tools installed
+- `ANDROID_HOME` or `ANDROID_SDK_ROOT` set, unless the SDK is at `~/android-sdk`
+
+Build the module locally:
+
+```sh
+./build.sh
+```
+
+Outputs:
+
+- `system/usr/share/lockscreen-powermenu-blocker/BlockerService.jar`
+- `build/lockscreen-powermenu-blocker.zip`
+
+Clean generated outputs:
+
+```sh
+./build.sh clean
+```
+
 ## Uninstallation
 
 - Remove the module from the Magisk app and reboot your device.
