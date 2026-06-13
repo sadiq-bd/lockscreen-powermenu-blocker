@@ -16,13 +16,37 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v5
 
+            - name: Set up JDK 17
+              uses: actions/setup-java@v4
+              with:
+                  distribution: "zulu"
+                  java-version: "17"
+
+            - name: Setup Android SDK Tools
+              uses: android-actions/setup-android@v3
+              with:
+                  api-level: 34
+                  build-tools: 34.0.0
+
+            - name: Compile Java Code
+              run: |
+                  javac -cp $ANDROID_HOME/platforms/android-34/android.jar BlockerService.java
+
+            - name: Dex Bytecode with d8
+              run: |
+                  $ANDROID_HOME/build-tools/34.0.0/d8 BlockerService.class --output system/usr/share/lockscreen-powermenu-blocker/BlockerService.jar
+
             - name: Create ZIP
               run: |
                   ZIP_NAME="lockscreen-powermenu-blocker.zip"
 
                   zip -r "$ZIP_NAME" . \
                     -x ".git/*" \
-                    -x ".github/*"
+                    -x ".github/*" \
+                    -x ".gitignore" \
+                    -x "BlockerService.java" \
+                    -x "BlockerService.class" \
+                    -x "system/usr/share/lockscreen-powermenu-blocker/placeholder"
 
                   echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
 
