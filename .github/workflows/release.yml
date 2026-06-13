@@ -34,7 +34,9 @@ jobs:
 
             - name: Dex Bytecode with d8
               run: |
-                  $ANDROID_HOME/build-tools/34.0.0/d8 BlockerService.class --output system/usr/share/lockscreen-powermenu-blocker/BlockerService.jar
+                  $ANDROID_HOME/build-tools/34.0.0/d8 *.class \
+                    --lib $ANDROID_HOME/platforms/android-34/android.jar \
+                    --output system/usr/share/lockscreen-powermenu-blocker/BlockerService.jar
 
             - name: Create ZIP
               run: |
@@ -44,8 +46,8 @@ jobs:
                     -x ".git/*" \
                     -x ".github/*" \
                     -x ".gitignore" \
-                    -x "BlockerService.java" \
-                    -x "BlockerService.class" \
+                    -x "*.java" \
+                    -x "*.class" \
                     -x "system/usr/share/lockscreen-powermenu-blocker/placeholder"
 
                   echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
