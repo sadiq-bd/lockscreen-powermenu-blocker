@@ -10,7 +10,11 @@ import android.os.Looper;
 import java.lang.reflect.Method;
 
 public class BlockerService {
+    private static final int SERVICE_BIND_RETRIES = 60;
+    private static final long SERVICE_BIND_RETRY_DELAY_MS = 1000;
     private static final long SAFETY_REFRESH_MS = 5000;
+    private static final long SHORT_STATE_REFRESH_MS = 250;
+    private static final long LONG_STATE_REFRESH_MS = 1500;
     private static final int USER_SYSTEM = 0;
     private static final String NULL_SENTINEL = "__LOCKSCREEN_POWERMENU_BLOCKER_NULL__";
     private static final String BACKUP_PREFIX = "lockscreen_powermenu_blocker_backup_";
@@ -41,41 +45,72 @@ public class BlockerService {
     public static void main(String[] args) {
         System.out.println("[BlockerService] Initializing internal power-menu policy daemon...");
 
-        initSystemServices();
+        ensureLooperPrepared();
+
+        if (!initSystemServices()) {
+            System.err.println("[BlockerService] Startup aborted: required Android services are unavailable.");
+            return;
+        }
+
         registerStateReceivers();
         applyPowerMenuPolicy("startup");
         scheduleSafetyRefresh();
 
-        if (Looper.myLooper() == null) {
-            Looper.prepare();
-        }
         Looper.loop();
     }
 
-    private static void initSystemServices() {
+    private static void ensureLooperPrepared() {
+        if (Looper.myLooper() == null) {
+            Looper.prepare();
+        }
+    }
+
+    private static boolean initSystemServices() {
         try {
             Class<?> sm = Class.forName("android.os.ServiceManager");
             Method getService = sm.getMethod("getService", String.class);
 
             // Bind WindowManager to check lock state
-            IBinder wmBinder = (IBinder) getService.invoke(null, "window");
+            IBinder wmBinder = waitForService(getService, "window");
             Class<?> wmStub = Class.forName("android.view.IWindowManager$Stub");
             windowManagerService = wmStub.getMethod("asInterface", IBinder.class).invoke(null, wmBinder);
+            if (windowManagerService == null) {
+                System.err.println("[BlockerService] WindowManager interface resolved to null.");
+                return false;
+            }
             isKeyguardLockedMethod = windowManagerService.getClass().getMethod("isKeyguardLocked");
 
             systemContext = createSystemContext();
             contentResolver = systemContext.getContentResolver();
             keyguardManager = (KeyguardManager) systemContext.getSystemService(Context.KEYGUARD_SERVICE);
-            if (Looper.myLooper() == null) {
-                Looper.prepare();
-            }
             handler = new Handler(Looper.myLooper());
 
             System.out.println("[BlockerService] Connected to WindowManager and SettingsProvider.");
+            return true;
         } catch (Exception e) {
             System.err.println("[BlockerService] Failed to initialize internal services:");
             e.printStackTrace();
+            return false;
         }
+    }
+
+    private static IBinder waitForService(Method getService, String name) throws Exception {
+        for (int attempt = 1; attempt <= SERVICE_BIND_RETRIES; attempt++) {
+            IBinder binder = (IBinder) getService.invoke(null, name);
+            if (binder != null) {
+                if (attempt > 1) {
+                    System.out.println("[BlockerService] Bound service '" + name + "' after " + attempt + " attempts.");
+                }
+                return binder;
+            }
+
+            if (attempt == 1 || attempt % 10 == 0) {
+                System.out.println("[BlockerService] Waiting for Android service '" + name + "'...");
+            }
+            Thread.sleep(SERVICE_BIND_RETRY_DELAY_MS);
+        }
+
+        throw new IllegalStateException("Timed out waiting for Android service: " + name);
     }
 
     private static Context createSystemContext() throws Exception {
@@ -103,6 +138,8 @@ public class BlockerService {
             public void onReceive(Context context, Intent intent) {
                 String action = intent != null ? intent.getAction() : "unknown";
                 applyPowerMenuPolicy(action);
+                scheduleOneShotPolicyRefresh(action, SHORT_STATE_REFRESH_MS);
+                scheduleOneShotPolicyRefresh(action, LONG_STATE_REFRESH_MS);
             }
         }, filter);
 
@@ -119,6 +156,17 @@ public class BlockerService {
                 scheduleSafetyRefresh();
             }
         }, SAFETY_REFRESH_MS);
+    }
+
+    private static void scheduleOneShotPolicyRefresh(final String reason, long delayMs) {
+        if (handler == null) return;
+
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                applyPowerMenuPolicy(reason + "+delayed");
+            }
+        }, delayMs);
     }
 
     private static void applyPowerMenuPolicy(String reason) {
