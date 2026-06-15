@@ -16,15 +16,41 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v5
 
-            - name: Create ZIP
+            - name: Set up NDK
               run: |
+                  curl -O https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+
+                  unzip -q android-ndk-r27d-linux.zip
+
+                  echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r27d" >> $GITHUB_ENV
+
+            - name: Compiling powerblockerd
+              run: |
+                  cd src
+
+                  APP_DAEMON="powerblockerd"
+
+                  $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang "$APP_DAEMON.c" -o "$APP_DAEMON"
+
+                  mkdir -p module/system/bin
+
+                  mv "$APP_DAEMON" module/system/bin
+
+            - name: Packaging Magisk module
+              run: |
+                  BUILD_DIR="$GITHUB_WORKSPACE/build"
                   ZIP_NAME="lockscreen-powermenu-blocker.zip"
+                  ZIP_PATH="$BUILD_DIR/$ZIP_NAME"
+                  MODULE_DIR="$GITHUB_WORKSPACE/src/module"
 
-                  zip -r "$ZIP_NAME" . \
-                    -x ".git/*" \
-                    -x ".github/*"
+                  mkdir -p "$BUILD_DIR"
 
-                  echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+                  (
+                    cd "$MODULE_DIR"
+                    zip -r "$ZIP_PATH" .
+                  )
+
+                  echo "ZIP_NAME=$ZIP_PATH" >> "$GITHUB_ENV"
 
             - name: Create Release
               uses: softprops/action-gh-release@v2
