@@ -26,15 +26,16 @@ jobs:
 
             - name: Compiling powerblockerd
               run: |
-                  cd src
 
                   APP_DAEMON="powerblockerd"
+                  BIN_PATH="src/module/system/bin"
+                  DAEMON_PATH="$BIN_PATH/$APP_DAEMON"
 
-                  $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang "$APP_DAEMON.c" -o "$APP_DAEMON"
+                  mkdir -p "$BIN_PATH"
 
-                  mkdir -p module/system/bin
-
-                  mv "$APP_DAEMON" module/system/bin
+                  $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang \
+                    "src/$APP_DAEMON.c" \
+                    -o "$DAEMON_PATH"
 
             - name: Packaging Magisk module
               run: |
@@ -53,7 +54,7 @@ jobs:
                   echo "ZIP_NAME=$ZIP_PATH" >> "$GITHUB_ENV"
 
             - name: Create Release
-              uses: softprops/action-gh-release@v2
+              uses: softprops/action-gh-release@v3
               with:
                   files: ${{ env.ZIP_NAME }}
                   generate_release_notes: true

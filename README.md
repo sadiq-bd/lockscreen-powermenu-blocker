@@ -1,4 +1,4 @@
-<p align="left"> <img src="https://api.sadiq.workers.dev/app/github/repo/lockscreen-powermenu-blocker/views" alt="" /> </p>
+<p align="right"> <img src="https://api.sadiq.workers.dev/app/github/repo/lockscreen-powermenu-blocker/views" alt="" /> </p>
 
 # lockscreen-powermenu-blocker
 
@@ -36,14 +36,14 @@ The module runs as a background native daemon. It attaches a non-blocking `poll(
 ## Compatibility
 
 - Android devices with Magisk/KernelSU installed.
-- Android 10+ (utilizes `dumpsys activity keyguard` for modern AOSP state tracking).
-- Works universally across most OEM ROMs (Samsung, Pixel, Xiaomi, etc.) without hardcoding hardware paths.
+- Android 10+ (utilizes `dumpsys window` for modern AOSP state tracking).
+- Works universally across most OEM ROMs without hardcoding hardware paths.
 
 ## Technical Details
 
 - **Hardware Interception:** Automatically scans up to 32 `/dev/input/event*` nodes and queries capabilities via `ioctl` to find the exact node broadcasting `KEY_POWER`.
 - **Event Loop:** Replaces the heavy `getevent` shell utility with a direct C file descriptor read, completely eliminating sub-process overhead.
-- **State Evaluation:** Uses `dumpsys activity keyguard` to determine the lock state, avoiding the massive memory overhead of standard window dumps. 
+- **State Evaluation:** Uses `dumpsys window` to determine the lock state, avoiding the massive memory overhead of standard shell dumps. 
 
 ## Source
 

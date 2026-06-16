@@ -70,7 +70,7 @@ echo "Compiling $APP_DAEMON.c..."
 rm -f "$DAEMON_PATH"
 "$ANDROID_CLANG" \
     "src/$APP_DAEMON.c" \
-    -o "$BIN_PATH/$APP_DAEMON"
+    -o "$DAEMON_PATH"
 
 [[ -s "$DAEMON_PATH" ]] || die "failed to create $DAEMON_PATH"
 
